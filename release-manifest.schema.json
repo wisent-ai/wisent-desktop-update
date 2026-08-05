@@ -15,6 +15,7 @@
     "minimum_system_version"
   ],
   "properties": {
+    "$schema": { "type": "string", "format": "uri" },
     "schema": { "const": 1 },
     "product": { "type": "string", "minLength": 1 },
     "bundle_id": { "type": "string", "minLength": 1 },
