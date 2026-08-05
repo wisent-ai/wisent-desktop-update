@@ -1,0 +1,252 @@
+name: Reusable macOS Sparkle release
+
+on:
+  workflow_call:
+    inputs:
+      manifest_path:
+        description: Repository-relative release manifest path
+        required: false
+        type: string
+        default: .wisent-desktop-release.json
+    secrets:
+      MACOS_CERT_P12:
+        required: true
+      MACOS_CERT_PASSWORD:
+        required: true
+      MACOS_SIGN_IDENTITY:
+        required: true
+      AC_API_KEY_ID:
+        required: true
+      AC_API_ISSUER_ID:
+        required: true
+      AC_API_KEY_P8:
+        required: true
+      SPARKLE_PRIVATE_KEY:
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: [self-hosted, macOS, stado]
+    timeout-minutes: 60
+    concurrency:
+      group: desktop-release-${{ github.repository }}
+      cancel-in-progress: false
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+
+      - name: Read and validate release manifest
+        id: release
+        env:
+          MANIFEST_PATH: ${{ inputs.manifest_path }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          import os
+          import pathlib
+          import re
+
+          tag = os.environ["RELEASE_TAG"]
+          match = re.fullmatch(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", tag)
+          if not match:
+              raise SystemExit("release tags must use immutable vMAJOR.MINOR.PATCH syntax")
+          version = tag[1:]
+          path = pathlib.Path(os.environ["MANIFEST_PATH"])
+          data = json.loads(path.read_text())
+          if data.get("schema") != 1:
+              raise SystemExit("release manifest schema must be 1")
+          required = ["product", "bundle_id", "bundle_path", "build_command", "archive_name", "feed_url"]
+          for key in required:
+              value = data.get(key)
+              if not isinstance(value, str) or not value.strip() or "\n" in value:
+                  raise SystemExit(f"release manifest {key} must be one non-empty line")
+          feed_url = data["feed_url"]
+          expected_feed = f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/releases/latest/download/appcast.xml"
+          if feed_url != expected_feed:
+              raise SystemExit(f"feed_url must be {expected_feed}")
+          archive_name = data["archive_name"].replace("{version}", version)
+          if "/" in archive_name or not archive_name.endswith(".zip"):
+              raise SystemExit("archive_name must be a .zip filename")
+          backend = data.get("backend") or {}
+          if not isinstance(backend, dict):
+              raise SystemExit("backend must be an object")
+          backend_repository = backend.get("repository", "")
+          backend_revision_file = backend.get("revision_file", "")
+          backend_checkout_path = backend.get("checkout_path", ".release-source")
+          backend_revision = ""
+          if backend_repository:
+              if not backend_revision_file:
+                  raise SystemExit("backend.revision_file is required with backend.repository")
+              backend_revision = pathlib.Path(backend_revision_file).read_text().strip()
+              if not re.fullmatch(r"[0-9a-f]{40}", backend_revision):
+                  raise SystemExit("backend revision must be one full Git commit SHA")
+          values = {
+              "version": version,
+              "product": data["product"],
+              "bundle_id": data["bundle_id"],
+              "bundle_path": data["bundle_path"],
+              "build_command": data["build_command"],
+              "archive_name": archive_name,
+              "feed_url": feed_url,
+              "minimum_system_version": data.get("minimum_system_version", "14.0"),
+              "backend_repository": backend_repository,
+              "backend_revision": backend_revision,
+              "backend_checkout_path": backend_checkout_path,
+          }
+          for key, value in values.items():
+              if not isinstance(value, str) or "\n" in value:
+                  raise SystemExit(f"release manifest output {key} must be one line")
+              print(f"{key}={value}")
+          PY
+
+      - name: Check out pinned backend source
+        if: steps.release.outputs.backend_repository != ''
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: ${{ steps.release.outputs.backend_repository }}
+          ref: ${{ steps.release.outputs.backend_revision }}
+          path: ${{ steps.release.outputs.backend_checkout_path }}
+
+      - name: Select newest installed Xcode
+        run: |
+          set -euo pipefail
+          newest="$(/usr/bin/find /Applications -maxdepth 1 -name 'Xcode*.app' -type d -print | /usr/bin/sort -V | /usr/bin/tail -1)"
+          test -n "$newest" || { echo "No versioned Xcode installation found" >&2; exit 1; }
+          sudo xcode-select -s "$newest"
+          swift --version
+
+      - name: Import Developer ID identity and build
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+          BUILD_COMMAND: ${{ steps.release.outputs.build_command }}
+          WISENT_RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          WISENT_BUILD_NUMBER: ${{ github.run_number }}
+          WISENT_UPDATE_FEED_URL: ${{ steps.release.outputs.feed_url }}
+          WISENT_RESTART_AFTER_BUILD: '0'
+        run: |
+          set -euo pipefail
+          : "${MACOS_CERT_P12:?MACOS_CERT_P12 is required}"
+          : "${MACOS_CERT_PASSWORD:?MACOS_CERT_PASSWORD is required}"
+          case "${MACOS_SIGN_IDENTITY:?MACOS_SIGN_IDENTITY is required}" in
+            'Developer ID Application:'*) ;;
+            *) echo "MACOS_SIGN_IDENTITY must be a Developer ID Application identity" >&2; exit 1 ;;
+          esac
+          keychain="$RUNNER_TEMP/wisent-desktop-release.keychain-db"
+          security create-keychain -p actions "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p actions "$keychain"
+          printf '%s' "$MACOS_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$keychain" -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+          security list-keychains -d user -s "$keychain" login.keychain
+          security set-key-partition-list -S apple-tool:,apple: -s -k actions "$keychain" >/dev/null
+          rm -f "$RUNNER_TEMP/cert.p12"
+          export WISENT_CODESIGN_IDENTITY="$MACOS_SIGN_IDENTITY"
+          /bin/bash -lc "$BUILD_COMMAND"
+
+      - name: Verify bundle contract
+        env:
+          APP_PATH: ${{ steps.release.outputs.bundle_path }}
+          EXPECTED_BUNDLE_ID: ${{ steps.release.outputs.bundle_id }}
+          EXPECTED_VERSION: ${{ steps.release.outputs.version }}
+          EXPECTED_FEED_URL: ${{ steps.release.outputs.feed_url }}
+        run: |
+          set -euo pipefail
+          test -d "$APP_PATH"
+          info="$APP_PATH/Contents/Info.plist"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$info")" = "$EXPECTED_BUNDLE_ID"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$info")" = "$EXPECTED_VERSION"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :SUFeedURL' "$info")" = "$EXPECTED_FEED_URL"
+          test -n "$(/usr/libexec/PlistBuddy -c 'Print :SUPublicEDKey' "$info")"
+          test -d "$APP_PATH/Contents/Frameworks/Sparkle.framework"
+          codesign --verify --strict --deep --verbose=2 "$APP_PATH"
+
+      - name: Notarize and staple bundle
+        env:
+          APP_PATH: ${{ steps.release.outputs.bundle_path }}
+          AC_API_KEY_ID: ${{ secrets.AC_API_KEY_ID }}
+          AC_API_ISSUER_ID: ${{ secrets.AC_API_ISSUER_ID }}
+          AC_API_KEY_P8: ${{ secrets.AC_API_KEY_P8 }}
+        run: |
+          set -euo pipefail
+          : "${AC_API_KEY_ID:?AC_API_KEY_ID is required}"
+          : "${AC_API_ISSUER_ID:?AC_API_ISSUER_ID is required}"
+          : "${AC_API_KEY_P8:?AC_API_KEY_P8 is required}"
+          printf '%s' "$AC_API_KEY_P8" | base64 --decode > "$RUNNER_TEMP/notary-key.p8"
+          ditto -c -k --keepParent "$APP_PATH" "$RUNNER_TEMP/notarize.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" \
+            --key "$RUNNER_TEMP/notary-key.p8" \
+            --key-id "$AC_API_KEY_ID" \
+            --issuer "$AC_API_ISSUER_ID" \
+            --wait
+          xcrun stapler staple "$APP_PATH"
+          xcrun stapler validate "$APP_PATH"
+          spctl --assess --type execute --verbose=2 "$APP_PATH"
+          rm -f "$RUNNER_TEMP/notary-key.p8" "$RUNNER_TEMP/notarize.zip"
+
+      - name: Generate signed archive, appcast, and digests
+        id: artifacts
+        env:
+          APP_PATH: ${{ steps.release.outputs.bundle_path }}
+          ARCHIVE_NAME: ${{ steps.release.outputs.archive_name }}
+          PRODUCT: ${{ steps.release.outputs.product }}
+          VERSION: ${{ steps.release.outputs.version }}
+          MINIMUM_SYSTEM_VERSION: ${{ steps.release.outputs.minimum_system_version }}
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          : "${SPARKLE_PRIVATE_KEY:?SPARKLE_PRIVATE_KEY is required}"
+          output="$RUNNER_TEMP/wisent-release"
+          feed="$RUNNER_TEMP/wisent-feed"
+          mkdir -p "$output" "$feed"
+          ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" "$feed/$ARCHIVE_NAME"
+          generate_appcast="$(/usr/bin/find .build -type f -path '*/Sparkle/bin/generate_appcast' -print -quit)"
+          test -x "$generate_appcast" || { echo "Sparkle generate_appcast was not resolved by the app build" >&2; exit 1; }
+          printf '%s' "$SPARKLE_PRIVATE_KEY" > "$RUNNER_TEMP/sparkle-private-key"
+          release_prefix="https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME"
+          "$generate_appcast" \
+            --ed-key-file "$RUNNER_TEMP/sparkle-private-key" \
+            --download-url-prefix "$release_prefix/" \
+            --minimum-system-version "$MINIMUM_SYSTEM_VERSION" \
+            "$feed"
+          mv "$feed/$ARCHIVE_NAME" "$output/$ARCHIVE_NAME"
+          mv "$feed/appcast.xml" "$output/appcast.xml"
+          shasum -a 256 "$output/$ARCHIVE_NAME" "$output/appcast.xml" > "$output/DIGESTS"
+          grep -F "$release_prefix/$ARCHIVE_NAME" "$output/appcast.xml"
+          grep -F "sparkle:edSignature=" "$output/appcast.xml"
+          printf 'archive=%s\n' "$output/$ARCHIVE_NAME" >> "$GITHUB_OUTPUT"
+          printf 'appcast=%s\n' "$output/appcast.xml" >> "$GITHUB_OUTPUT"
+          printf 'digests=%s\n' "$output/DIGESTS" >> "$GITHUB_OUTPUT"
+          printf '%s %s\n' "$PRODUCT" "$VERSION" > "$RUNNER_TEMP/release-notes.txt"
+          rm -f "$RUNNER_TEMP/sparkle-private-key"
+
+      - name: Publish immutable GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARCHIVE: ${{ steps.artifacts.outputs.archive }}
+          APPCAST: ${{ steps.artifacts.outputs.appcast }}
+          DIGESTS: ${{ steps.artifacts.outputs.digests }}
+          PRODUCT: ${{ steps.release.outputs.product }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --draft \
+            --title "$PRODUCT $VERSION" \
+            --notes-file "$RUNNER_TEMP/release-notes.txt"
+          gh release upload "$GITHUB_REF_NAME" "$ARCHIVE" "$APPCAST" "$DIGESTS" \
+            --repo "$GITHUB_REPOSITORY"
+          gh release edit "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --draft=false \
+            --latest

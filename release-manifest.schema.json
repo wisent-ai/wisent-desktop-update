@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/wisent-ai/wisent-desktop-update/release-manifest.schema.json",
+  "title": "Wisent desktop release manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "product",
+    "bundle_id",
+    "bundle_path",
+    "build_command",
+    "archive_name",
+    "feed_url",
+    "minimum_system_version"
+  ],
+  "properties": {
+    "schema": { "const": 1 },
+    "product": { "type": "string", "minLength": 1 },
+    "bundle_id": { "type": "string", "minLength": 1 },
+    "bundle_path": { "type": "string", "minLength": 1 },
+    "build_command": { "type": "string", "minLength": 1 },
+    "archive_name": {
+      "type": "string",
+      "pattern": "^[^/]+\\{version\\}[^/]*\\.zip$"
+    },
+    "feed_url": {
+      "type": "string",
+      "format": "uri",
+      "pattern": "^https://github\\.com/wisent-ai/[^/]+/releases/latest/download/appcast\\.xml$"
+    },
+    "minimum_system_version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+$"
+    },
+    "backend": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "revision_file", "checkout_path"],
+      "properties": {
+        "repository": { "type": "string", "pattern": "^[^/]+/[^/]+$" },
+        "revision_file": { "type": "string", "minLength": 1 },
+        "checkout_path": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}
