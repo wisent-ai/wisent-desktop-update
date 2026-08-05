@@ -23,6 +23,10 @@ on:
         required: true
       SPARKLE_PRIVATE_KEY:
         required: true
+      WISENT_APP_PROVISIONING_PROFILE:
+        required: false
+      WISENT_NETWORK_FILTER_PROVISIONING_PROFILE:
+        required: false
 
 permissions:
   contents: write
@@ -127,11 +131,14 @@ jobs:
           MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
           MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
           MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+          APP_PROVISIONING_PROFILE: ${{ secrets.WISENT_APP_PROVISIONING_PROFILE }}
+          NETWORK_FILTER_PROVISIONING_PROFILE: ${{ secrets.WISENT_NETWORK_FILTER_PROVISIONING_PROFILE }}
           BUILD_COMMAND: ${{ steps.release.outputs.build_command }}
           WISENT_RELEASE_VERSION: ${{ steps.release.outputs.version }}
           WISENT_BUILD_NUMBER: ${{ github.run_number }}
           WISENT_UPDATE_FEED_URL: ${{ steps.release.outputs.feed_url }}
           WISENT_RESTART_AFTER_BUILD: '0'
+          WISENT_INSTALL_AFTER_BUILD: '0'
         run: |
           set -euo pipefail
           : "${MACOS_CERT_P12:?MACOS_CERT_P12 is required}"
@@ -150,6 +157,14 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple: -s -k actions "$keychain" >/dev/null
           rm -f "$RUNNER_TEMP/cert.p12"
           export WISENT_CODESIGN_IDENTITY="$MACOS_SIGN_IDENTITY"
+          if [ -n "${APP_PROVISIONING_PROFILE:-}" ]; then
+            printf '%s' "$APP_PROVISIONING_PROFILE" | base64 --decode > "$RUNNER_TEMP/app.provisionprofile"
+            export WISENT_APP_PROVISIONING_PROFILE="$RUNNER_TEMP/app.provisionprofile"
+          fi
+          if [ -n "${NETWORK_FILTER_PROVISIONING_PROFILE:-}" ]; then
+            printf '%s' "$NETWORK_FILTER_PROVISIONING_PROFILE" | base64 --decode > "$RUNNER_TEMP/network-filter.provisionprofile"
+            export WISENT_NETWORK_FILTER_PROVISIONING_PROFILE="$RUNNER_TEMP/network-filter.provisionprofile"
+          fi
           /bin/bash -lc "$BUILD_COMMAND"
 
       - name: Verify bundle contract
