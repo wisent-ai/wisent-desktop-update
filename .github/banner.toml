@@ -1,0 +1,15 @@
+[automation]
+managed = true
+source_fingerprint = "b1c791595afefa8a"
+category = "agent"
+
+[banner]
+title = "Wisent Desktop Update acts. Work keeps moving."
+description = "Shared Sparkle runtime and macOS release workflow for Wisent desktop apps"
+product = "Wisent"
+url = "wisent.ai"
+theme = "dark"
+layout = "orbit-left"
+art_seed = "wisent-desktop-update"
+width = 1584
+height = 396
