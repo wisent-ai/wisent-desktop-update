@@ -9,6 +9,7 @@
 <!-- wisent-readme-signals:end -->
 
 # wisent-desktop-update
+
 Ship a Mac App Update Without Shipping a Release Process.
 
 Every native application needs the same unglamorous machinery: build the bundle,
