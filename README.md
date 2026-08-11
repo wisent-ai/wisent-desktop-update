@@ -9,3 +9,12 @@
 <!-- wisent-readme-signals:end -->
 
 # wisent-desktop-update
+Ship a Mac App Update Without Shipping a Release Process.
+
+Every native application needs the same unglamorous machinery: build the bundle,
+sign it, notarize it, write an appcast, host it, and make the app check for it.
+Wisent Desktop Update is that machinery once, shared by every Wisent macOS app
+through one reusable release workflow. Tag a version and the signed, notarized
+build reaches your users through their own updater.
+
+Release Plumbing, Solved Once.
