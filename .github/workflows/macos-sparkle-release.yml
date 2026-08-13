@@ -120,12 +120,19 @@ jobs:
           ref: ${{ steps.release.outputs.backend_revision }}
           path: ${{ steps.release.outputs.backend_checkout_path }}
 
-      - name: Select newest installed Xcode
+      - name: Select available Apple toolchain
         run: |
           set -euo pipefail
           newest="$(/usr/bin/find /Applications -maxdepth 1 -name 'Xcode*.app' -type d -print | /usr/bin/sort -V | /usr/bin/tail -1)"
-          test -n "$newest" || { echo "No versioned Xcode installation found" >&2; exit 1; }
-          sudo xcode-select -s "$newest"
+          if [[ -n "$newest" ]]; then
+            sudo xcode-select -s "$newest"
+          else
+            developer_dir="$(xcode-select -p)"
+            test -d "$developer_dir" || { echo "No Apple developer toolchain found" >&2; exit 1; }
+          fi
+          xcrun --find swift
+          xcrun --find notarytool
+          xcrun --find stapler
           swift --version
 
       - name: Prepare Developer ID identity
