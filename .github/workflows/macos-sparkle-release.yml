@@ -10,11 +10,13 @@ on:
         default: .wisent-desktop-release.json
     secrets:
       MACOS_CERT_P12:
-        required: true
+        required: false
       MACOS_CERT_PASSWORD:
-        required: true
+        required: false
       MACOS_SIGN_IDENTITY:
-        required: true
+        required: false
+      RELEASE_BOOTSTRAP_TOKEN:
+        required: false
       AC_API_KEY_ID:
         required: true
       AC_API_ISSUER_ID:
@@ -126,11 +128,169 @@ jobs:
           sudo xcode-select -s "$newest"
           swift --version
 
-      - name: Import Developer ID identity and build
+      - name: Prepare Developer ID identity
+        id: signing
         env:
           MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
           MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
           MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+          RELEASE_BOOTSTRAP_TOKEN: ${{ secrets.RELEASE_BOOTSTRAP_TOKEN }}
+          AC_API_KEY_ID: ${{ secrets.AC_API_KEY_ID }}
+          AC_API_ISSUER_ID: ${{ secrets.AC_API_ISSUER_ID }}
+          AC_API_KEY_P8: ${{ secrets.AC_API_KEY_P8 }}
+        run: |
+          set -euo pipefail
+          keychain="$RUNNER_TEMP/wisent-desktop-release.keychain-db"
+          security create-keychain -p actions "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p actions "$keychain"
+
+          if [ -n "$MACOS_CERT_P12" ] || [ -n "$MACOS_CERT_PASSWORD" ] || [ -n "$MACOS_SIGN_IDENTITY" ]; then
+            : "${MACOS_CERT_P12:?MACOS_CERT_P12 is required when persistent signing is configured}"
+            : "${MACOS_CERT_PASSWORD:?MACOS_CERT_PASSWORD is required when persistent signing is configured}"
+            : "${MACOS_SIGN_IDENTITY:?MACOS_SIGN_IDENTITY is required when persistent signing is configured}"
+            case "$MACOS_SIGN_IDENTITY" in
+              'Developer ID Application:'*) ;;
+              *) echo "MACOS_SIGN_IDENTITY must be a Developer ID Application identity" >&2; exit 1 ;;
+            esac
+            printf '%s' "$MACOS_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+            security import "$RUNNER_TEMP/cert.p12" -k "$keychain" -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+            identity="$MACOS_SIGN_IDENTITY"
+          else
+            : "${RELEASE_BOOTSTRAP_TOKEN:?RELEASE_BOOTSTRAP_TOKEN is required to provision the first signing identity}"
+            : "${AC_API_KEY_ID:?AC_API_KEY_ID is required}"
+            : "${AC_API_ISSUER_ID:?AC_API_ISSUER_ID is required}"
+            : "${AC_API_KEY_P8:?AC_API_KEY_P8 is required}"
+            printf '%s' "$AC_API_KEY_P8" | base64 --decode > "$RUNNER_TEMP/app-store-connect-key.p8"
+            openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$RUNNER_TEMP/developer-id-key.pem"
+            openssl req -new \
+              -key "$RUNNER_TEMP/developer-id-key.pem" \
+              -subj "/CN=Wisent desktop release" \
+              -out "$RUNNER_TEMP/developer-id.csr"
+            cat > "$RUNNER_TEMP/issue-developer-id.py" <<'PY'
+          import base64
+          import json
+          import os
+          import pathlib
+          import subprocess
+          import time
+          import urllib.error
+          import urllib.request
+
+          def b64url(value):
+              return base64.urlsafe_b64encode(value).rstrip(b"=").decode()
+
+          def read_length(value, offset):
+              first = value[offset]
+              if first < 128:
+                  return first, offset + 1
+              width = first & 127
+              return int.from_bytes(value[offset + 1:offset + 1 + width], "big"), offset + 1 + width
+
+          def jwt():
+              header = b64url(json.dumps(
+                  {"alg": "ES256", "kid": os.environ["AC_API_KEY_ID"], "typ": "JWT"},
+                  separators=(",", ":"),
+              ).encode())
+              now = int(time.time())
+              payload = b64url(json.dumps(
+                  {"iss": os.environ["AC_API_ISSUER_ID"], "iat": now, "exp": now + 900, "aud": "appstoreconnect-v1"},
+                  separators=(",", ":"),
+              ).encode())
+              signing_input = f"{header}.{payload}".encode()
+              signature = subprocess.run(
+                  ["openssl", "dgst", "-sha256", "-sign", os.environ["ASC_KEY_PATH"]],
+                  input=signing_input,
+                  check=True,
+                  capture_output=True,
+              ).stdout
+              if signature[0] != 0x30:
+                  raise SystemExit("OpenSSL returned an invalid ES256 signature")
+              _, position = read_length(signature, 1)
+              values = []
+              for _ in range(2):
+                  if signature[position] != 0x02:
+                      raise SystemExit("OpenSSL returned an invalid ES256 integer")
+                  length, position = read_length(signature, position + 1)
+                  values.append(int.from_bytes(signature[position:position + length], "big"))
+                  position += length
+              raw = values[0].to_bytes(32, "big") + values[1].to_bytes(32, "big")
+              return f"{header}.{payload}.{b64url(raw)}"
+
+          csr = pathlib.Path(os.environ["CSR_PATH"]).read_text()
+          body = json.dumps({
+              "data": {
+                  "type": "certificates",
+                  "attributes": {
+                      "certificateType": "DEVELOPER_ID_APPLICATION",
+                      "csrContent": csr,
+                  },
+              },
+          }).encode()
+          request = urllib.request.Request(
+              "https://api.appstoreconnect.apple.com/v1/certificates",
+              data=body,
+              method="POST",
+              headers={"Authorization": f"Bearer {jwt()}", "Content-Type": "application/json"},
+          )
+          try:
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  result = json.load(response)
+          except urllib.error.HTTPError as error:
+              raise SystemExit(f"App Store Connect certificate request failed: {error.code} {error.read().decode()}") from error
+          certificate = result["data"]
+          pathlib.Path(os.environ["CERT_PATH"]).write_bytes(
+              base64.b64decode(certificate["attributes"]["certificateContent"])
+          )
+          print(certificate["id"])
+          PY
+            certificate_id="$(
+              ASC_KEY_PATH="$RUNNER_TEMP/app-store-connect-key.p8" \
+              CSR_PATH="$RUNNER_TEMP/developer-id.csr" \
+              CERT_PATH="$RUNNER_TEMP/developer-id.cer" \
+              python3 "$RUNNER_TEMP/issue-developer-id.py"
+            )"
+            test -n "$certificate_id"
+            openssl x509 -inform DER -in "$RUNNER_TEMP/developer-id.cer" -out "$RUNNER_TEMP/developer-id.pem"
+            security import "$RUNNER_TEMP/developer-id-key.pem" -k "$keychain" -T /usr/bin/codesign
+            security import "$RUNNER_TEMP/developer-id.pem" -k "$keychain" -T /usr/bin/codesign
+            identity="$(
+              security find-identity -v -p codesigning "$keychain" |
+                sed -n 's/^[[:space:]]*[0-9]*) [0-9A-F]* "\(Developer ID Application:[^"]*\)".*/\1/p' |
+                head -1
+            )"
+            test -n "$identity" || { echo "issued certificate did not create a Developer ID identity" >&2; exit 1; }
+            certificate_password="$(openssl rand -base64 48 | tr -d '\n')"
+            export certificate_password
+            openssl pkcs12 -export \
+              -inkey "$RUNNER_TEMP/developer-id-key.pem" \
+              -in "$RUNNER_TEMP/developer-id.pem" \
+              -out "$RUNNER_TEMP/cert.p12" \
+              -passout env:certificate_password
+            base64 < "$RUNNER_TEMP/cert.p12" | tr -d '\n' |
+              GH_TOKEN="$RELEASE_BOOTSTRAP_TOKEN" gh secret set MACOS_CERT_P12 --repo "$GITHUB_REPOSITORY"
+            printf '%s' "$certificate_password" |
+              GH_TOKEN="$RELEASE_BOOTSTRAP_TOKEN" gh secret set MACOS_CERT_PASSWORD --repo "$GITHUB_REPOSITORY"
+            printf '%s' "$identity" |
+              GH_TOKEN="$RELEASE_BOOTSTRAP_TOKEN" gh secret set MACOS_SIGN_IDENTITY --repo "$GITHUB_REPOSITORY"
+            GH_TOKEN="$RELEASE_BOOTSTRAP_TOKEN" gh secret delete RELEASE_BOOTSTRAP_TOKEN --repo "$GITHUB_REPOSITORY"
+          fi
+
+          security list-keychains -d user -s "$keychain" login.keychain
+          security set-key-partition-list -S apple-tool:,apple: -s -k actions "$keychain" >/dev/null
+          security find-identity -v -p codesigning "$keychain" | grep -F "\"$identity\""
+          printf 'WISENT_CODESIGN_IDENTITY=%s\n' "$identity" >> "$GITHUB_ENV"
+          rm -f \
+            "$RUNNER_TEMP/cert.p12" \
+            "$RUNNER_TEMP/app-store-connect-key.p8" \
+            "$RUNNER_TEMP/developer-id-key.pem" \
+            "$RUNNER_TEMP/developer-id.csr" \
+            "$RUNNER_TEMP/developer-id.cer" \
+            "$RUNNER_TEMP/developer-id.pem" \
+            "$RUNNER_TEMP/issue-developer-id.py"
+
+      - name: Build application
+        env:
           APP_PROVISIONING_PROFILE: ${{ secrets.WISENT_APP_PROVISIONING_PROFILE }}
           NETWORK_FILTER_PROVISIONING_PROFILE: ${{ secrets.WISENT_NETWORK_FILTER_PROVISIONING_PROFILE }}
           BUILD_COMMAND: ${{ steps.release.outputs.build_command }}
@@ -141,22 +301,6 @@ jobs:
           WISENT_INSTALL_AFTER_BUILD: '0'
         run: |
           set -euo pipefail
-          : "${MACOS_CERT_P12:?MACOS_CERT_P12 is required}"
-          : "${MACOS_CERT_PASSWORD:?MACOS_CERT_PASSWORD is required}"
-          case "${MACOS_SIGN_IDENTITY:?MACOS_SIGN_IDENTITY is required}" in
-            'Developer ID Application:'*) ;;
-            *) echo "MACOS_SIGN_IDENTITY must be a Developer ID Application identity" >&2; exit 1 ;;
-          esac
-          keychain="$RUNNER_TEMP/wisent-desktop-release.keychain-db"
-          security create-keychain -p actions "$keychain"
-          security set-keychain-settings -lut 21600 "$keychain"
-          security unlock-keychain -p actions "$keychain"
-          printf '%s' "$MACOS_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
-          security import "$RUNNER_TEMP/cert.p12" -k "$keychain" -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
-          security list-keychains -d user -s "$keychain" login.keychain
-          security set-key-partition-list -S apple-tool:,apple: -s -k actions "$keychain" >/dev/null
-          rm -f "$RUNNER_TEMP/cert.p12"
-          export WISENT_CODESIGN_IDENTITY="$MACOS_SIGN_IDENTITY"
           if [ -n "${APP_PROVISIONING_PROFILE:-}" ]; then
             printf '%s' "$APP_PROVISIONING_PROFILE" | base64 --decode > "$RUNNER_TEMP/app.provisionprofile"
             export WISENT_APP_PROVISIONING_PROFILE="$RUNNER_TEMP/app.provisionprofile"
@@ -265,3 +409,7 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --draft=false \
             --latest
+
+      - name: Remove temporary signing keychain
+        if: always()
+        run: security delete-keychain "$RUNNER_TEMP/wisent-desktop-release.keychain-db" 2>/dev/null || true
