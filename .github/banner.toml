@@ -1,13 +1,13 @@
 [automation]
 managed = true
-source_fingerprint = "b1c791595afefa8a"
+source_fingerprint = "73a8513894b86415"
 category = "agent"
 
 [banner]
 title = "Wisent Desktop Update acts. Work keeps moving."
 description = "Shared Sparkle runtime and macOS release workflow for Wisent desktop apps"
 product = "Wisent"
-url = "wisent.ai"
+url = "wisent.com"
 theme = "dark"
 layout = "orbit-left"
 art_seed = "wisent-desktop-update"
