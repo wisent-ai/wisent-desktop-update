@@ -145,21 +145,35 @@ jobs:
       # rewrite covers both. It is scoped to this job through git's environment
       # configuration rather than written into the runner user's ~/.gitconfig,
       # where it would outlive the run.
+      #
+      # Measured on lem-desktop run 33981972497: the organization publisher
+      # runs as its own user with no git credential of any kind, and a private
+      # pinned source died with `could not read Username for
+      # 'https://github.com'`. RELEASE_BOOTSTRAP_TOKEN is the organization
+      # credential `stado host publisher-runner repository-add` already grants
+      # every desktop repository, so it is the default when no repository_token
+      # is supplied; a repository that wants a narrower read token passes one.
       - name: Configure private Git dependency access
         env:
           REPOSITORY_TOKEN: ${{ secrets.repository_token }}
+          BOOTSTRAP_TOKEN: ${{ secrets.RELEASE_BOOTSTRAP_TOKEN }}
         run: |
           set -euo pipefail
-          if [ -z "$REPOSITORY_TOKEN" ]; then
+          if [ -n "$REPOSITORY_TOKEN" ]; then
+            token="$REPOSITORY_TOKEN"
+            printf '%s\n' "repository_token supplied; rewriting github.com origins for this job."
+          elif [ -n "$BOOTSTRAP_TOKEN" ]; then
+            token="$BOOTSTRAP_TOKEN"
+            printf '%s\n' "No repository_token; using RELEASE_BOOTSTRAP_TOKEN for github.com origins in this job."
+          else
             printf '%s\n' \
-              "No repository_token. Private dependencies and pinned sources must" \
-              "resolve through this runner's own git credentials."
+              "No repository_token and no RELEASE_BOOTSTRAP_TOKEN. Private dependencies" \
+              "and pinned sources must resolve through this runner's own git credentials."
             exit 0
           fi
-          printf '%s\n' "repository_token supplied; rewriting github.com origins for this job."
           {
             printf 'GIT_CONFIG_COUNT=1\n'
-            printf 'GIT_CONFIG_KEY_0=url.https://x-access-token:%s@github.com/.insteadOf\n' "$REPOSITORY_TOKEN"
+            printf 'GIT_CONFIG_KEY_0=url.https://x-access-token:%s@github.com/.insteadOf\n' "$token"
             printf 'GIT_CONFIG_VALUE_0=https://github.com/\n'
           } >> "$GITHUB_ENV"
 
