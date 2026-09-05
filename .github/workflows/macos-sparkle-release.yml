@@ -29,6 +29,13 @@ on:
         required: false
       WISENT_NETWORK_FILTER_PROVISIONING_PROFILE:
         required: false
+      # Used only when SwiftPM or a pinned source checkout must read a private
+      # repository of this organization. Without it, resolution goes through
+      # the runner's own provisioned git credential helper, which is how the
+      # fleet's macOS builder already reads private packages (see swift-gates
+      # in wisent-ai/quality-control).
+      repository_token:
+        required: false
 
 permissions:
   contents: write
@@ -80,19 +87,43 @@ jobs:
           archive_name = data["archive_name"].replace("{version}", version)
           if "/" in archive_name or not archive_name.endswith(".zip"):
               raise SystemExit("archive_name must be a .zip filename")
-          backend = data.get("backend") or {}
-          if not isinstance(backend, dict):
-              raise SystemExit("backend must be an object")
-          backend_repository = backend.get("repository", "")
-          backend_revision_file = backend.get("revision_file", "")
-          backend_checkout_path = backend.get("checkout_path", ".release-source")
-          backend_revision = ""
-          if backend_repository:
-              if not backend_revision_file:
-                  raise SystemExit("backend.revision_file is required with backend.repository")
-              backend_revision = pathlib.Path(backend_revision_file).read_text().strip()
-              if not re.fullmatch(r"[0-9a-f]{40}", backend_revision):
-                  raise SystemExit("backend revision must be one full Git commit SHA")
+          # A desktop application often builds against product source that lives
+          # in another repository. `backend` names one such source; `backends`
+          # names several, for an application whose Package.swift reaches two
+          # levels of path dependencies (lem-desktop -> lem -> oko). Each entry is
+          # pinned to one full commit read from a committed file, and lands at a
+          # path inside the workspace; the build command is what wires it into
+          # the package graph.
+          sources = []
+          if "backend" in data and "backends" in data:
+              raise SystemExit("name pinned sources as backend or backends, not both")
+          raw_backends = data.get("backends")
+          if raw_backends is None:
+              backend = data.get("backend") or {}
+              raw_backends = [backend] if backend else []
+          if not isinstance(raw_backends, list):
+              raise SystemExit("backends must be a list")
+          seen_paths = set()
+          for backend in raw_backends:
+              if not isinstance(backend, dict):
+                  raise SystemExit("each pinned source must be an object")
+              repository = backend.get("repository", "")
+              revision_file = backend.get("revision_file", "")
+              checkout_path = backend.get("checkout_path", ".release-source")
+              if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
+                  raise SystemExit(f"pinned source repository must be owner/name, got {repository!r}")
+              if not revision_file:
+                  raise SystemExit(f"{repository}: revision_file is required")
+              revision = pathlib.Path(revision_file).read_text().strip()
+              if not re.fullmatch(r"[0-9a-f]{40}", revision):
+                  raise SystemExit(f"{revision_file} must hold one full Git commit SHA")
+              parts = pathlib.PurePosixPath(checkout_path).parts
+              if not parts or checkout_path.startswith("/") or ".." in parts or parts == (".",):
+                  raise SystemExit(f"{repository}: checkout_path must stay inside the workspace, got {checkout_path!r}")
+              if checkout_path in seen_paths:
+                  raise SystemExit(f"two pinned sources share checkout_path {checkout_path!r}")
+              seen_paths.add(checkout_path)
+              sources.append({"repository": repository, "revision": revision, "path": checkout_path})
           values = {
               "version": version,
               "product": data["product"],
@@ -102,9 +133,7 @@ jobs:
               "archive_name": archive_name,
               "feed_url": feed_url,
               "minimum_system_version": data.get("minimum_system_version", "14.0"),
-              "backend_repository": backend_repository,
-              "backend_revision": backend_revision,
-              "backend_checkout_path": backend_checkout_path,
+              "sources": json.dumps(sources, separators=(",", ":")),
           }
           for key, value in values.items():
               if not isinstance(value, str) or "\n" in value:
@@ -112,13 +141,52 @@ jobs:
               print(f"{key}={value}")
           PY
 
-      - name: Check out pinned backend source
-        if: steps.release.outputs.backend_repository != ''
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          repository: ${{ steps.release.outputs.backend_repository }}
-          ref: ${{ steps.release.outputs.backend_revision }}
-          path: ${{ steps.release.outputs.backend_checkout_path }}
+      # SwiftPM fetches over https and so does the checkout below, so one
+      # rewrite covers both. It is scoped to this job through git's environment
+      # configuration rather than written into the runner user's ~/.gitconfig,
+      # where it would outlive the run.
+      - name: Configure private Git dependency access
+        env:
+          REPOSITORY_TOKEN: ${{ secrets.repository_token }}
+        run: |
+          set -euo pipefail
+          if [ -z "$REPOSITORY_TOKEN" ]; then
+            printf '%s\n' \
+              "No repository_token. Private dependencies and pinned sources must" \
+              "resolve through this runner's own git credentials."
+            exit 0
+          fi
+          printf '%s\n' "repository_token supplied; rewriting github.com origins for this job."
+          {
+            printf 'GIT_CONFIG_COUNT=1\n'
+            printf 'GIT_CONFIG_KEY_0=url.https://x-access-token:%s@github.com/.insteadOf\n' "$REPOSITORY_TOKEN"
+            printf 'GIT_CONFIG_VALUE_0=https://github.com/\n'
+          } >> "$GITHUB_ENV"
+
+      # Plain git rather than actions/checkout: that action authenticates with
+      # this repository's job token, which cannot read a private sibling, and
+      # it refuses a second checkout outside its own workspace rules. A fetch by
+      # full commit is exact, and HEAD is compared against the pinned value
+      # afterwards so a rewritten branch cannot change what ships.
+      - name: Check out pinned sources
+        if: steps.release.outputs.sources != '[]'
+        env:
+          SOURCES: ${{ steps.release.outputs.sources }}
+        run: |
+          set -euo pipefail
+          python3 -c 'import json, os
+          for source in json.loads(os.environ["SOURCES"]):
+              print("\t".join((source["repository"], source["revision"], source["path"])))' |
+          while IFS="$(printf '\t')" read -r repository revision path; do
+            rm -rf "$path"
+            mkdir -p "$path"
+            git -C "$path" init --quiet
+            git -C "$path" remote add origin "https://github.com/$repository.git"
+            git -C "$path" fetch --quiet --depth 1 origin "$revision"
+            git -C "$path" checkout --quiet --detach FETCH_HEAD
+            test "$(git -C "$path" rev-parse HEAD)" = "$revision"
+            printf '%s at %s -> %s\n' "$repository" "$revision" "$path"
+          done
 
       - name: Select available Apple toolchain
         run: |
