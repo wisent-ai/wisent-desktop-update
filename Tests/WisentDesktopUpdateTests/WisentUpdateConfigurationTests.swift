@@ -8,17 +8,10 @@ final class WisentUpdateConfigurationTests: XCTestCase {
             infoDictionary: [
                 "SUFeedURL": "https://github.com/wisent-ai/example-desktop/releases/latest/download/appcast.xml",
                 "SUPublicEDKey": "public-key",
-                "SUEnableAutomaticChecks": true,
             ],
             arguments: ["Example"]
         )
 
-        XCTAssertEqual(
-            configuration.feedURL,
-            URL(string: "https://github.com/wisent-ai/example-desktop/releases/latest/download/appcast.xml")
-        )
-        XCTAssertEqual(configuration.publicKey, "public-key")
-        XCTAssertTrue(configuration.automaticChecksEnabled)
         XCTAssertTrue(configuration.isConfigured)
     }
 

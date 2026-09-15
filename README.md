@@ -18,4 +18,15 @@ Wisent Desktop Update is that machinery once, shared by every Wisent macOS app
 through one reusable release workflow. Tag a version and the signed, notarized
 build reaches your users through their own updater.
 
-Release Plumbing, Solved Once.
+## Building from source
+
+The package links Sparkle's checksummed binary archive directly. Its URL and
+checksum come from the same upstream release the former Git wrapper selected;
+the framework and public updater API have not changed.
+
+Use `wisent-products swift --package-path . build` for an owner-local build.
+The shared builder resolves source dependencies from canonical `main` checkouts
+and refuses missing or ambiguous sources instead of creating another checkout.
+Its command results and source records remain under `.wisent-output/native/`.
+Preparing a consumer app is not signing it: the app's normal signing and
+installation steps must still verify the complete bundle before replacement.
