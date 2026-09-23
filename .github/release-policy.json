@@ -1,0 +1,5 @@
+{
+  "schema_version": 1,
+  "releases": false,
+  "reason": "This repository owns the reusable macOS release workflow and Swift support code used by product repositories; it does not publish a versioned product artifact of its own."
+}
