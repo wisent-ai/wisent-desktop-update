@@ -24,7 +24,7 @@ The package links Sparkle's checksummed binary archive directly. Its URL and
 checksum come from the same upstream release the former Git wrapper selected;
 the framework and public updater API have not changed.
 
-Use `wisent-products swift --package-path . build` for an owner-local build.
+Use `stado product swift --package-path . build` for an owner-local build.
 The shared builder resolves source dependencies from canonical `main` checkouts
 and refuses missing or ambiguous sources instead of creating another checkout.
 Its command results and source records remain under `.wisent-output/native/`.
