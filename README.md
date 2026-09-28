@@ -12,11 +12,13 @@
 
 Ship a Mac App Update Without Shipping a Release Process.
 
-Every native application needs the same unglamorous machinery: build the bundle,
-sign it, notarize it, write an appcast, host it, and make the app check for it.
-Wisent Desktop Update is that machinery once, shared by every Wisent macOS app
-through one reusable release workflow. Tag a version and the signed, notarized
-build reaches your users through their own updater.
+Every native application needs the same updater: a Sparkle `Check for Updates…`
+command that reads a signed appcast and verifies each archive against the app's
+`SUPublicEDKey`. Wisent Desktop Update is that updater once, shared by every
+Wisent macOS app. Building, signing, notarizing and publishing a release is
+Stado's: `stado build submit <app>` publishes it and Stado serves the feed at
+`/api/release/appcast?product=<app>`, which `.wisent-desktop-release.json`
+names as `feed_url`.
 
 ## Building from source
 

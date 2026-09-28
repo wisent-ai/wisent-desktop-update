@@ -28,7 +28,7 @@
     "feed_url": {
       "type": "string",
       "format": "uri",
-      "pattern": "^https://github\\.com/wisent-ai/[^/]+/releases/latest/download/appcast\\.xml$"
+      "pattern": "^https://[^/]+/api/release/appcast\\?product=[a-z0-9-]+$"
     },
     "minimum_system_version": {
       "type": "string",
