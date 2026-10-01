@@ -19,9 +19,5 @@ let package = Package(
                 .target(name: "Sparkle"),
             ]
         ),
-        .testTarget(
-            name: "WisentDesktopUpdateTests",
-            dependencies: ["WisentDesktopUpdate"]
-        ),
     ]
 )
