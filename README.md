@@ -25,6 +25,9 @@ The release manifest describes the product and bundle, not a deployment host.
 non-HTTPS answers and registry failures stop the bundle build; there is no
 fallback to a checked-in address. An unavailable registry must be repaired at
 the declared Stado storage service, not replaced with a guessed public URL.
+Checked-in `App/Info.plist` templates keep `SUFeedURL` empty. The builder
+writes the resolved HTTPS address into the bundle copy, never back into the
+source template, so a build cannot publish its deployment address in Git.
 
 ## Building from source
 
