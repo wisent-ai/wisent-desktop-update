@@ -17,8 +17,14 @@ command that reads a signed appcast and verifies each archive against the app's
 `SUPublicEDKey`. Wisent Desktop Update is that updater once, shared by every
 Wisent macOS app. Building, signing, notarizing and publishing a release is
 Stado's: `stado build submit <app>` publishes it and Stado serves the feed at
-`/api/release/appcast?product=<app>`, which `.wisent-desktop-release.json`
-names as `feed_url`.
+`/api/release/appcast?product=<app>`. Both source bundles and release pipelines
+resolve its deployment origin through
+`stado web origin url /api/release/appcast --query product=<app>`.
+The release manifest describes the product and bundle, not a deployment host.
+`WISENT_UPDATE_FEED_URL` selects an explicit staging feed instead. Empty or
+non-HTTPS answers and registry failures stop the bundle build; there is no
+fallback to a checked-in address. An unavailable registry must be repaired at
+the declared Stado storage service, not replaced with a guessed public URL.
 
 ## Building from source
 
@@ -32,3 +38,18 @@ and refuses missing or ambiguous sources instead of creating another checkout.
 Its command results and source records remain under `.wisent-output/native/`.
 Preparing a consumer app is not signing it: the app's normal signing and
 installation steps must still verify the complete bundle before replacement.
+
+## Real consumer feed verification
+
+Run `node tests/feed/bundle.mjs --app-root <consumer-checkout>` from this
+repository. The runner uses the consumer's declared bundle command, disables
+installation and restart, reads the live Stado feed, and checks the built
+bundle's `SUFeedURL`. It also requires the real builder to refuse an HTTP
+override, then restores a valid source bundle through the same build command.
+It uses the sole consumer checkout and leaves application installations alone.
+
+Reports, exact source revisions, command exit statuses, logs and the fetched
+appcast remain under `.build/real-tests/feed/`. A registry, signing, dependency
+or feed failure is blocked qualification, not a passing update test. This test
+checks bundle feed selection and reachability; it does not claim a completed
+Sparkle installation or a graphical update journey.
