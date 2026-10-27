@@ -1,22 +1,28 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { closeSync, mkdirSync, mkdtempSync, openSync, readFileSync, writeFileSync } from 'node:fs';
+import { closeSync, constants, mkdirSync, mkdtempSync, openSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parseArgs } from 'node:util';
+
+// A process that exits with status zero succeeded
+// (https://pubs.opengroup.org/onlinepubs/9799919799/functions/exit.html).
+const EXIT_SUCCESS = 0;
+// Evidence is readable and writable by the account that ran the test only.
+const OWNER_ONLY = constants.S_IRUSR | constants.S_IWUSR;
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
-const args = process.argv.slice(2);
-if (args.length !== 2 || args[0] !== '--app-root') {
-  console.error('usage: node tests/feed/bundle.mjs --app-root <consumer-checkout>');
-  process.exit(2);
+const { values } = parseArgs({ options: { 'app-root': { type: 'string' } }, strict: true });
+if (values['app-root'] === undefined) {
+  throw new Error('usage: node tests/feed/bundle.mjs --app-root <consumer-checkout>');
 }
-const appRoot = resolve(args[1]);
+const appRoot = resolve(values['app-root']);
 const evidenceRoot = join(root, '.build/real-tests/feed');
 mkdirSync(evidenceRoot, { recursive: true });
 const evidence = mkdtempSync(join(evidenceRoot, 'run-'));
 const report = { started_at: new Date().toISOString(), app_root: appRoot, commands: [], result: 'blocked' };
-const environment = { ...process.env, WISENT_INSTALL_AFTER_BUILD: '0', WISENT_RESTART_AFTER_BUILD: '0' };
+const environment = { ...process.env, WISENT_INSTALL_AFTER_BUILD: 'no' };
 delete environment.WISENT_UPDATE_FEED_URL;
 delete environment.SKARBIEC_UPDATE_FEED_URL;
 
@@ -24,8 +30,8 @@ function run(executable, arguments_, cwd, env = environment) {
   const index = report.commands.length;
   const stdoutPath = join(evidence, `${index}.stdout.log`);
   const stderrPath = join(evidence, `${index}.stderr.log`);
-  const stdout = openSync(stdoutPath, 'w', 0o600);
-  const stderr = openSync(stderrPath, 'w', 0o600);
+  const stdout = openSync(stdoutPath, 'w', OWNER_ONLY);
+  const stderr = openSync(stderrPath, 'w', OWNER_ONLY);
   let child;
   try {
     child = spawnSync(executable, arguments_, { cwd, env, stdio: ['ignore', stdout, stderr] });
@@ -39,10 +45,11 @@ function run(executable, arguments_, cwd, env = environment) {
   return { ...result, output: readFileSync(stdoutPath, 'utf8'), errors: readFileSync(stderrPath, 'utf8') };
 }
 function success(result) {
-  assert.equal(result.exit_status, 0, `${result.executable} failed: ${result.errors || result.error || result.signal}`);
+  assert.equal(result.exit_status, EXIT_SUCCESS, `${result.executable} failed: ${result.errors || result.error || result.signal}`);
   return result.output.trim();
 }
 
+let failure;
 try {
   report.revision = success(run('git', ['rev-parse', 'HEAD'], root));
   report.consumer_revision = success(run('git', ['rev-parse', 'HEAD'], appRoot));
@@ -50,7 +57,7 @@ try {
   report.test_sha256 = createHash('sha256').update(readFileSync(fileURLToPath(import.meta.url))).digest('hex');
   const manifest = JSON.parse(readFileSync(join(appRoot, '.wisent-desktop-release.json'), 'utf8'));
   const release = JSON.parse(readFileSync(join(appRoot, '.wisent-release.json'), 'utf8'));
-  assert.match(release.product, /^[a-z0-9-]+$/);
+  assert.match(release.product, /^[a-z\d-]+$/);
   assert.equal(typeof manifest.build_command, 'string');
   const plist = resolve(appRoot, manifest.bundle_path, 'Contents/Info.plist');
   assert.ok(plist.startsWith(`${join(appRoot, '.build')}/`), 'the bundle must be inside the consumer ignored build directory');
@@ -60,14 +67,15 @@ try {
   report.resolved_feed = feed;
   const response = await fetch(feed);
   const appcast = await response.text();
-  writeFileSync(join(evidence, 'appcast.xml'), appcast, { mode: 0o600 });
+  writeFileSync(join(evidence, 'appcast.xml'), appcast, { mode: OWNER_ONLY });
   report.appcast = { requested_url: feed, final_url: response.url, status: response.status };
-  assert.equal(response.status, 200, 'the resolved feed must be readable');
+  assert.ok(response.ok, `the resolved feed must be readable; it answered ${response.status}`);
   assert.match(appcast, /<rss\b/);
   assert.match(appcast, /<channel\b/);
 
   // Execute the product's declared build operation in its sole checkout.
-  // Each desktop manifest disables installation; the shared flags also disable restart.
+  // Each desktop manifest disables installation, and a build that does not
+  // install restarts nothing.
   report.build_command = manifest.build_command;
   success(run('/bin/sh', ['-c', manifest.build_command], appRoot));
   const observed = success(run('/usr/bin/plutil', ['-extract', 'SUFeedURL', 'raw', '-o', '-', plist], appRoot));
@@ -76,7 +84,7 @@ try {
 
   const invalid = run('/bin/sh', ['-c', manifest.build_command], appRoot,
     { ...environment, WISENT_UPDATE_FEED_URL: 'http://example.invalid/appcast' });
-  assert.notEqual(invalid.exit_status, 0, 'an insecure feed must refuse the build');
+  assert.notEqual(invalid.exit_status, EXIT_SUCCESS, 'an insecure feed must refuse the build');
   assert.notEqual(invalid.exit_status, null, 'a killed build does not prove a feed refusal');
   assert.match(`${invalid.output}\n${invalid.errors}`, /(?:feed.*HTTPS|HTTPS.*feed)/i,
     'the refusal must identify the update feed, not an unrelated build failure');
@@ -89,9 +97,13 @@ try {
   report.result = 'passed';
 } catch (error) {
   report.error = error.stack ?? String(error);
-  process.exitCode = 1;
+  failure = error;
 } finally {
   report.finished_at = new Date().toISOString();
-  writeFileSync(join(evidence, 'report.json'), `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
+  writeFileSync(join(evidence, 'report.json'), `${JSON.stringify(report, null, '  ')}\n`, { mode: OWNER_ONLY });
   console.log(`${report.result}: ${join(evidence, 'report.json')}`);
+}
+// The report is written first; the failure then ends the run with its cause.
+if (failure !== undefined) {
+  throw failure;
 }
